@@ -10,28 +10,38 @@ using MatrixGen = const uint8_t*;
 using DotMul64Fn = uint32_t(*)(Matrix8x8, Matrix8x8);
 using DotMulGenFn = uint32_t(*)(MatrixGen, MatrixGen, int count);
 
-uint32_t mat_dot_prod_64(Matrix8x8 a, Matrix8x8 b)
-{
-	uint32_t sum = 0;
-	for (int i = 0; i < 8; ++i)
-		for (int j = 0; j < 8; ++j)
-			sum += static_cast<uint32_t>(a[i][j]) * b[i][j];
-	return sum;
-}
+uint32_t mat_dot_prod_64(Matrix8x8 a, Matrix8x8 b);
+uint32_t mat_dot_prod_gen(MatrixGen a, MatrixGen b, int count);
 
-uint32_t mat_dot_prod_gen(MatrixGen a,
-	MatrixGen b, int count)
+extern "C"
 {
-	uint32_t sum = 0;
-	for (int i = 0; i < count; ++i)
-		sum += static_cast<uint32_t>(a[i]) * b[i];
-	return sum;
+	uint32_t mat_dot_prod_64_masm_nommx(Matrix8x8 a, Matrix8x8 b);
+	uint32_t mat_dot_prod_64_masm_mmx(Matrix8x8 a, Matrix8x8 b);
+	uint32_t mat_dot_prod_gen_masm_nommx(MatrixGen a, MatrixGen b, int count);
+	uint32_t mat_dot_prod_gen_masm_mmx(MatrixGen a, MatrixGen b, int count);
 }
 
 static_assert(std::is_same_v<decltype(&mat_dot_prod_64), DotMul64Fn>);
 static_assert(std::is_same_v<decltype(&mat_dot_prod_gen), DotMulGenFn>);
 
 constexpr int BENCH_REPEATS = 1000000;
+
+uint32_t mat_dot_prod_64(Matrix8x8 a, Matrix8x8 b)
+{
+	uint32_t sum = 0;
+	for (int i = 0; i < 8; ++i)
+		for (int j = 0; j < 8; ++j)
+			sum += static_cast<uint32_t>(a[i][j])* b[i][j];
+	return sum;
+}
+
+uint32_t mat_dot_prod_gen(MatrixGen a, MatrixGen b, int count)
+{
+	uint32_t sum = 0;
+	for (int i = 0; i < count; ++i)
+		sum += static_cast<uint32_t>(a[i])* b[i];
+	return sum;
+}
 
 template<typename Fn, typename... Params>
 void bench(std::string_view description,
@@ -48,14 +58,6 @@ void bench(std::string_view description,
 	std::cout << "    Result: " << result << std::endl;
 	std::cout << "    Time: " << duration_cast<milliseconds>(
 		end - start).count() << " milliseconds" << std::endl;
-}
-
-extern "C"
-{
-	uint32_t mat_dot_prod_64_masm_nommx(Matrix8x8 a, Matrix8x8 b);
-	uint32_t mat_dot_prod_64_masm_mmx(Matrix8x8 a, Matrix8x8 b);
-	uint32_t mat_dot_prod_gen_masm_nommx(MatrixGen a, MatrixGen b, int count);
-	uint32_t mat_dot_prod_gen_masm_mmx(MatrixGen a, MatrixGen b, int count);
 }
 
 int main()
@@ -84,6 +86,7 @@ int main()
 	std::cout << "All calculations are done "
 		<< BENCH_REPEATS << " times" << std::endl;
 	std::cout << std::endl;
+	std::cout << "Dot-multiplying two 8x8 matrices having 64 elements" << std::endl;
 	bench("C++ dot product 64 values: ",
 		mat_dot_prod_64, a, b);
 	bench("ASM dot product 64 values no mmx: ",
@@ -105,6 +108,8 @@ int main()
 	int rows, columns, cur;
 	ifs >> rows >> columns;
 	const int count = rows * columns;
+	std::cout << "Dot-multiplying two " << rows << 'x' << columns
+		<< " matrices having " << count << " elements" << std::endl;
 	std::vector<uint8_t> matrices[2];
 	for (auto& matrix : matrices)
 	{
