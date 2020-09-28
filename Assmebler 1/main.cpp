@@ -95,49 +95,57 @@ int main()
 		mat_dot_prod_64_masm_mmx, a, b);
 	std::cout << std::endl;
 
-	std::cout << "Enter filename for general matrices: ";
-	std::string filename;
+	char again = 'n';
 	do
 	{
-		if (!filename.empty())
-			std::cout << "File does not exist, enter again please: ";
-		std::getline(std::cin, filename);
-	} while (!std::filesystem::exists(filename));
-	
-	std::ifstream ifs(filename);
-	int rows, columns, cur;
-	ifs >> rows >> columns;
-	const int count = rows * columns;
-	std::cout << "Dot-multiplying two " << rows << 'x' << columns
-		<< " matrices having " << count << " elements" << std::endl;
-	std::vector<uint8_t> matrices[2];
-	for (auto& matrix : matrices)
-	{
-		matrix.reserve(count);
-		for (int i = 0; i < count; ++i)
+		std::cout << "Enter filename for general matrices: ";
+		std::string filename;
+		do
 		{
-			ifs >> cur;
-			if (cur < 0 || 255 < cur)
-				std::cerr << "Value too low, assuming 0" << std::endl, cur = 0;
-			else if (cur > 255)
-				std::cerr << "Value too big, assuming 255" << std::endl, cur = 255;
-			matrix.push_back(cur);
+			if (!filename.empty())
+				std::cout << "File does not exist, enter again please: ";
+			std::getline(std::cin, filename);
+		} while (!std::filesystem::exists(filename));
+
+		std::ifstream ifs(filename);
+		int rows, columns, cur;
+		ifs >> rows >> columns;
+		const int count = rows * columns;
+		std::cout << "Dot-multiplying two " << rows << 'x' << columns
+			<< " matrices having " << count << " elements" << std::endl;
+		std::vector<uint8_t> matrices[2];
+		for (auto& matrix : matrices)
+		{
+			matrix.reserve(count);
+			for (int i = 0; i < count; ++i)
+			{
+				ifs >> cur;
+				if (cur < 0 || 255 < cur)
+					std::cerr << "Value too low, assuming 0" << std::endl, cur = 0;
+				else if (cur > 255)
+					std::cerr << "Value too big, assuming 255" << std::endl, cur = 255;
+				matrix.push_back(cur);
+			}
 		}
-	}
 
-	if (!ifs)
-	{
-		std::cerr << "Error reading values from file" << std::endl;
-		return 0;
-	}
+		if (!ifs)
+		{
+			std::cerr << "Error reading values from file" << std::endl;
+			return 0;
+		}
 
-	std::cout << std::endl;
-	bench("C++ dot product arbitrary values: ",
-		mat_dot_prod_gen, matrices[0].data(), matrices[1].data(), count);
-	bench("ASM dot product arbitrary values no mmx: ",
-		mat_dot_prod_gen_masm_nommx, matrices[0].data(), matrices[1].data(), count);
-	bench("ASM dot product arbitrary values mmx: ",
-		mat_dot_prod_gen_masm_mmx, matrices[0].data(), matrices[1].data(), count);
+		std::cout << std::endl;
+		bench("C++ dot product arbitrary values: ",
+			mat_dot_prod_gen, matrices[0].data(), matrices[1].data(), count);
+		bench("ASM dot product arbitrary values no mmx: ",
+			mat_dot_prod_gen_masm_nommx, matrices[0].data(), matrices[1].data(), count);
+		bench("ASM dot product arbitrary values mmx: ",
+			mat_dot_prod_gen_masm_mmx, matrices[0].data(), matrices[1].data(), count);
+
+		std::cout << std::endl;
+		std::cout << "Do you want to test another file? ('Y' or 'y' for yes): ";
+		std::cin >> again;
+	} while (again == 'Y' || again == 'y');
 
 	return 0;
 }
