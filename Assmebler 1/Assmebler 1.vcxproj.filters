@@ -23,5 +23,8 @@
     <MASM Include="mult.asm">
       <Filter>Source Files</Filter>
     </MASM>
+    <MASM Include="mult_float.asm">
+      <Filter>Source Files</Filter>
+    </MASM>
   </ItemGroup>
 </Project>
