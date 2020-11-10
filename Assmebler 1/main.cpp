@@ -85,11 +85,10 @@ void bench(std::string_view description,
 		result = "None";
 
 	auto start = high_resolution_clock::now();
-	if constexpr (ResultVoid)
-		for (int i = 0; i < BENCH_REPEATS; ++i)
+	for (int i = 0; i < BENCH_REPEATS; ++i)
+		if constexpr (ResultVoid)
 			mulFn(std::forward<Params>(params)...);
-	else
-		for (int i = 0; i < BENCH_REPEATS; ++i)
+		else
 			result = mulFn(std::forward<Params>(params)...);
 	auto end = high_resolution_clock::now();
 
