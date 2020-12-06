@@ -33,18 +33,25 @@ int main(int argc, char* argv[])
 	const int n = atoi(argv[1]);
 	MPI_Init(&argc, &argv);
 
-	int procCnt, curProcRank, curElems;
+	int procCnt, curProcRank;
 	MPI_Comm_size(MPI_COMM_WORLD, &procCnt);
 	MPI_Comm_rank(MPI_COMM_WORLD, &curProcRank);
-	curElems = n / procCnt;
-	if (curProcRank < n % procCnt)
-		++curElems;
-	const string procStr = "Process " + std::to_string(curProcRank) + ": ";
+	vector<int> counts(1), disps(1);
 	if (curProcRank == 0)
 	{
+		counts.resize(procCnt);
+		disps.resize(procCnt);
+		const int mainCount = n / procCnt, extraCount = n % procCnt;
+		for (int i = 0, curDisp = 0; i < procCnt; ++i)
+		{
+			disps[i] = curDisp;
+			curDisp += (counts[i] = mainCount + (i < extraCount));
+		}
 		cout << "Number of processes: " << procCnt << endl;
 		cout << "Number of matrix data elements N: " << n << endl;
 	}
+	const int curElems = n / procCnt + (curProcRank < n % procCnt);
+	const string procStr = "Process " + std::to_string(curProcRank) + ": ";
 	cout << procStr << "processing " << curElems << " elements" << endl;
 	vector<real> a(1), x(1), ap(curElems), xp(curElems);
 
@@ -69,10 +76,10 @@ int main(int argc, char* argv[])
 	// Term function using our myCos function for cosine
 	auto termFn = [](real a, real x) {return a * myCos(x); };
 
-	MPI_Scatter(&a[0], curElems, MY_MPI_REAL, &ap[0], curElems, MY_MPI_REAL,
-		0, MPI_COMM_WORLD);
-	MPI_Scatter(&x[0], curElems, MY_MPI_REAL, &xp[0], curElems, MY_MPI_REAL,
-		0, MPI_COMM_WORLD);
+	MPI_Scatterv(a.data(), counts.data(), disps.data(), MY_MPI_REAL, ap.data(),
+		curElems, MY_MPI_REAL, 0, MPI_COMM_WORLD);
+	MPI_Scatterv(x.data(), counts.data(), disps.data(), MY_MPI_REAL, xp.data(),
+		curElems, MY_MPI_REAL, 0, MPI_COMM_WORLD);
 	const real sum = transform_reduce(begin(ap), end(ap), begin(xp), 0.0,
 		plus(), termFn);
 	real total = 0.0;
