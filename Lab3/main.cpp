@@ -5,14 +5,16 @@
 #include <chrono>
 #include <thread>
 #include <bit>
+#include <barrier>
 #include <omp.h>
-#include <intrin.h>
+
+#include "svector.h"
 
 constexpr uint32_t BASE_BITS = 32;
 constexpr uint64_t BASE = 1ull << BASE_BITS;
 constexpr uint64_t BASE_MASK = BASE - 1;
 
-constexpr uint32_t MAX_DIGIT_COUNT = 512;
+constexpr uint32_t MAX_DIGIT_COUNT = 800;
 constexpr uint32_t MAX_BIT_COUNT = MAX_DIGIT_COUNT * BASE_BITS;
 
 constexpr int BENCH_REPEATS = 1;
@@ -26,16 +28,19 @@ ComparisonResult compare(const LongNum& a, const LongNum& b);
 
 struct LongNum
 {
+	using DigitContainer = SVector<uint32_t, MAX_DIGIT_COUNT>;
+
 	LongNum(uint32_t siz = 1, uint32_t num = 0)
 		: digits(siz)
 	{
 		assert(siz);
-		digits[0] = num;
+		for (uint32_t i = 0; i < siz; ++i)
+			digits[i] = num;
 	}
-	LongNum(const std::vector<uint32_t>& digs)
+	LongNum(const DigitContainer& digs)
 		: digits(digs)
 	{}
-	LongNum(std::vector<uint32_t>&& digs)
+	LongNum(DigitContainer&& digs)
 		: digits(std::move(digs))
 	{}
 
@@ -71,6 +76,8 @@ struct LongNum
 	}
 	LongNum higherDigits(uint32_t cnt) const
 	{
+		if (cnt == 0)
+			return LongNum(1, 0);
 		assert(cnt <= size());
 		LongNum ret(cnt);
 		std::copy(std::cend(digits) - cnt, std::cend(digits),
@@ -79,7 +86,8 @@ struct LongNum
 	}
 	LongNum lowerDigits(uint32_t cnt) const
 	{
-		assert(cnt <= size());
+		//assert(cnt <= size());
+		cnt = std::min(cnt, size());
 		LongNum ret(cnt);
 		std::copy(std::cbegin(digits), std::cbegin(digits) + cnt,
 			std::begin(ret.digits));
@@ -93,6 +101,27 @@ struct LongNum
 	bool lowestBit() const
 	{
 		return digits[0] & 1;
+	}
+	uint32_t popcount() const
+	{
+		uint32_t popcnt = 0;
+		for (uint32_t i = 0; i < size(); ++i)
+			popcnt += std::popcount(digits[i]);
+		return popcnt;
+	}
+	LongNum shiftWordsUp(uint32_t cnt) const
+	{
+		LongNum res = *this;
+		res.digits.insert(std::begin(res.digits), cnt, 0u);
+		return res;
+	}
+	LongNum shiftWordsDown(uint32_t cnt) const
+	{
+		LongNum res = *this;
+		res.digits.erase(std::begin(res.digits), cnt);
+		if (res.digits.empty())
+			res.digits.push_back(0);
+		return res;
 	}
 	LongNum& operator+=(uint32_t rhs)
 	{
@@ -191,8 +220,11 @@ struct LongNum
 		return *this;
 	}
 
-	std::vector<uint32_t> digits; // Little Endian, [0] is lowest
+	DigitContainer digits; // Little Endian, [0] is lowest
 };
+
+uint32_t R_DIGIT_COUNT = 1; // R = pow(BASE, R_DIGIT_COUNT)
+LongNum R;
 
 ComparisonResult compare(const LongNum& a, const LongNum& b)
 {
@@ -223,6 +255,16 @@ bool operator>(const LongNum& a, const LongNum& b)
 	return compare(a, b) == COMP_GREATER;
 }
 
+bool operator<=(const LongNum& a, const LongNum& b)
+{
+	return compare(a, b) != COMP_GREATER;
+}
+
+bool operator>=(const LongNum& a, const LongNum& b)
+{
+	return compare(a, b) != COMP_LESS;
+}
+
 LongNum operator+(LongNum a, uint32_t b)
 {
 	return a += b;
@@ -243,6 +285,12 @@ LongNum operator-(LongNum a, const LongNum& b)
 	return a -= b;
 }
 
+LongNum uncheckedMinus(LongNum a, const LongNum& b)
+{
+	// return a.uncheckedMinusEq(b);
+	return a -= b;
+}
+
 LongNum mul(const LongNum& a, uint32_t b)
 {
 	LongNum result(a.size() + 1);
@@ -260,7 +308,7 @@ LongNum mul(const LongNum& a, uint32_t b)
 
 LongNum mul(const LongNum& a, const LongNum& b)
 {
-	LongNum result(a.size() + b.size());
+	LongNum result(a.size() + b.size(), 0);
 	for (uint32_t i = 0; i < a.size(); ++i)
 	{
 		uint32_t carry = 0, rIdx = i;
@@ -283,8 +331,8 @@ std::pair<LongNum, LongNum> divmod(const LongNum& a, const LongNum& b)
 	if (a.size() < b.size())
 		return { LongNum(), a };
 
-	std::vector<uint32_t> quoDigitsBE; // Big Endian, [0] is highest
-	quoDigitsBE.reserve(a.size() - b.size() + 1);
+	LongNum::DigitContainer quoDigitsBE; // Big Endian, [0] is highest
+	//quoDigitsBE.reserve(a.size() - b.size() + 1);
 	LongNum rem = a.higherDigits(b.size());
 
 	auto reduce = [&]() {
@@ -326,6 +374,48 @@ LongNum operator/(const LongNum& a, const LongNum& b)
 LongNum operator%(const LongNum& a, const LongNum& b)
 {
 	return divmod(a, b).second;
+}
+
+int64_t modinv(int64_t a, int64_t n)
+{
+	int64_t t = 0, r = n, newT = 1, newR = a;
+
+	while (newR)
+	{
+		const auto [quot, rem] = std::div(r, newR);
+		std::tie(t, newT) = std::tuple(newT, t - quot * newT);
+		std::tie(r, newR) = std::tuple(newR, rem);
+		newT %= n;
+	}
+
+	assert(r == 1);
+	if (t >= n)
+		return t - n;
+	return t;
+}
+
+// a^(-1) mod (BASE^k)
+// According to algorithm from https://eprint.iacr.org/2017/411.pdf
+// Modified by doing first iteration separately and holding '-b' from
+// the paper in variable b (because for iterations with i >= 1 'b' from paper
+// is non-positive, so here b is non-negative as is needed for unsigned LongNum type) 
+LongNum modinv_base_k(const LongNum& a, const uint32_t k)
+{
+	const uint32_t c = modinv(a[0], BASE);
+	LongNum::DigitContainer x;
+
+	x.push_back(c);
+	LongNum b = (mul(a, c) - 1u).shiftWordsDown(1);
+	for (uint32_t i = 1; i < k; ++i)
+	{
+		const uint32_t cur = (~b[0] + 1) * c;
+		x.push_back(cur);
+
+		b = b + mul(a, cur);
+		b = b.shiftWordsDown(1); // b is divisible by BASE here
+	}
+
+	return x;
 }
 
 LongNum fromString(std::string_view str)
@@ -410,12 +500,87 @@ LongNum ladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	return r[0];
 }
 
+// Montgomery reduction
+LongNum redc(const LongNum& x, const LongNum& mod, const LongNum& modRInv)
+{
+	const LongNum m = mul(x.lowerDigits(R_DIGIT_COUNT), modRInv)
+		.lowerDigits(R_DIGIT_COUNT);
+	const LongNum t = (x + mul(m, mod))
+		.shiftWordsDown(R_DIGIT_COUNT);
+	if (t >= mod)
+		return t - mod;
+	return t;
+}
+
+// Binary algorithm with montgomery multiplication
+LongNum monpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+{
+	LongNum xMon = x.shiftWordsUp(R_DIGIT_COUNT) % mod;
+	LongNum resMon = R % mod;
+	const LongNum modRInv = R - modinv_base_k(mod, R_DIGIT_COUNT);
+
+	for (uint32_t idx = 0; idx < BASE_BITS * pow.size(); ++idx)
+	{
+		if (pow.testBit(idx))
+		{
+			resMon = mul(resMon, xMon);
+			resMon = redc(resMon, mod, modRInv);
+		}
+		xMon = mul(xMon, xMon);
+		xMon = redc(xMon, mod, modRInv);
+	}
+	return redc(resMon, mod, modRInv);
+}
+
+// Binary left-to-right algorithm with montgomery multiplication
+LongNum monltrpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+{
+	LongNum xMon = x.shiftWordsUp(R_DIGIT_COUNT) % mod;
+	LongNum resMon = R % mod;
+	const LongNum modRInv = R - modinv_base_k(mod, R_DIGIT_COUNT);
+
+	for (uint32_t idx = BASE_BITS * pow.size() - 1;
+		idx != (uint32_t)(-1); --idx)
+	{
+		resMon = mul(resMon, resMon);
+		resMon = redc(resMon, mod, modRInv);
+		if (pow.testBit(idx))
+		{
+			resMon = mul(resMon, xMon);
+			resMon = redc(resMon, mod, modRInv);
+		}
+	}
+
+	return redc(resMon, mod, modRInv);
+}
+
+// Montgomery ladder algorithm with montgomery multiplication
+LongNum monladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+{
+	const LongNum modRInv = R - modinv_base_k(mod, R_DIGIT_COUNT);
+
+	LongNum r[2] = { R % mod, x.shiftWordsUp(R_DIGIT_COUNT) % mod }, newR[2];
+	for (uint32_t idx = BASE_BITS * pow.size() - 1;
+		idx != (uint32_t)(-1); --idx)
+	{
+		const uint32_t curBit = pow.testBit(idx);
+		newR[curBit] = mul(r[curBit], r[curBit]);
+		newR[curBit] = redc(newR[curBit], mod, modRInv);
+		newR[!curBit] = mul(r[0], r[1]);
+		newR[!curBit] = redc(newR[!curBit], mod, modRInv);
+
+		r[0] = newR[0];
+		r[1] = newR[1];
+	}
+	return redc(r[0], mod, modRInv);
+}
+
 LongNum P_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
 	LongNum res(1, 1), x2;
 	for (uint32_t idx = 0; idx < BASE_BITS * pow.size(); ++idx)
 	{
-		#pragma omp parallel sections
+		#pragma omp parallel sections num_threads(2)
 		{
 			#pragma omp section
 			{
@@ -436,26 +601,36 @@ LongNum P_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 LongNum T_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
 	LongNum res(1, 1), x2;
-	for (uint32_t idx = 0; idx < BASE_BITS * pow.size(); ++idx)
-	{
-		std::thread t1([&]() {
+
+	std::barrier bar(2);
+	std::thread t1([&]() {
+		for (uint32_t idx = 0; idx < BASE_BITS * pow.size(); ++idx)
+		{
 			if (pow.testBit(idx))
 				res = mul(res, x) % mod;
-		});
-		std::thread t2([&]() {
+			bar.arrive_and_wait();
+			x = x2;
+			bar.arrive_and_wait();
+		}
+	});
+	std::thread t2([&]() {
+		for (uint32_t idx = 0; idx < BASE_BITS * pow.size(); ++idx)
+		{
 			x2 = mul(x, x) % mod;
-		});
-		t1.join();
-		t2.join();
+			bar.arrive_and_wait();
+			bar.arrive_and_wait();
+		}
+	});
 
-		x = x2;
-	}
+	t1.join();
+	t2.join();
+
 	return res;
 }
 
 LongNum D_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
-	// const uint32_t powHSize = pow.size() / 3;
+	//const uint32_t powHSize = pow.size() / 2;
 	uint32_t powHSize = 0, bitCnt = 0, desiredHBitCnt = 0;
 	for (uint32_t i = 0; i < pow.size(); ++i)
 		desiredHBitCnt += __popcnt(pow[i]);
@@ -475,7 +650,7 @@ LongNum D_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	const LongNum powL = pow.lowerDigits(powLSize);
 	LongNum resH, resL;
 
-	#pragma omp parallel sections
+	#pragma omp parallel sections num_threads(2)
 	{
 		#pragma omp section
 		{
@@ -495,21 +670,7 @@ LongNum D_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 
 LongNum DT_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
-	// const uint32_t powHSize = pow.size() / 3;
-	uint32_t powHSize = 0, bitCnt = 0, desiredHBitCnt = 0;
-	for (uint32_t i = 0; i < pow.size(); ++i)
-		desiredHBitCnt += __popcnt(pow[i]);
-	desiredHBitCnt /= 3;
-	while (true)
-	{
-		bitCnt += __popcnt(pow[pow.size() - 1 - powHSize]);
-		if (bitCnt > desiredHBitCnt)
-			break;
-		++powHSize;
-	}
-	if (powHSize == 0)
-		return powmod(x, pow, mod);
-
+	const uint32_t powHSize = pow.size() / 3;
 	const uint32_t powLSize = pow.size() - powHSize;
 	const LongNum powH = pow.higherDigits(powHSize);
 	const LongNum powL = pow.lowerDigits(powLSize);
@@ -530,7 +691,56 @@ LongNum DT_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	return mul(resH, resL) % mod;
 }
 
-// Parallel Montgomery ladder algorithm
+LongNum D_ltrpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+{
+	const uint32_t powHSize = pow.size() / 2;
+	const uint32_t powLSize = pow.size() - powHSize;
+	const LongNum powH = pow.higherDigits(powHSize);
+	const LongNum powL = pow.lowerDigits(powLSize);
+	LongNum resH, resL;
+
+	#pragma omp parallel sections num_threads(2)
+	{
+		#pragma omp section
+		{
+			LongNum xx = x;
+			for (uint32_t i = 0; i < BASE_BITS * powLSize; ++i)
+				xx = mul(xx, xx) % mod;
+			resH = ltrpowmod(xx, powH, mod);
+		}
+		#pragma omp section
+		{
+			resL = ltrpowmod(x, powL, mod);
+		}
+	}
+
+	return mul(resH, resL) % mod;
+}
+
+LongNum DT_ltrpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+{
+	const uint32_t powHSize = pow.size() / 2;
+	const uint32_t powLSize = pow.size() - powHSize;
+	const LongNum powH = pow.higherDigits(powHSize);
+	const LongNum powL = pow.lowerDigits(powLSize);
+	LongNum resH, resL;
+
+	std::thread t1([&]() {
+		LongNum xx = x;
+		for (uint32_t i = 0; i < BASE_BITS * powLSize; ++i)
+			xx = mul(xx, xx) % mod;
+		resH = ltrpowmod(xx, powH, mod);
+	});
+	std::thread t2([&]() {
+		resL = ltrpowmod(x, powL, mod);
+	});
+	t1.join();
+	t2.join();
+
+	return mul(resH, resL) % mod;
+}
+
+// Parallel OpenMP Montgomery ladder algorithm
 LongNum P_ladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
 	LongNum r[2] = { LongNum(1, 1), x }, newR[2];
@@ -538,7 +748,7 @@ LongNum P_ladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 		idx != (uint32_t)(-1); --idx)
 	{
 		const uint32_t curBit = pow.testBit(idx);
-		#pragma omp parallel sections
+		#pragma omp parallel sections num_threads(2)
 		{
 			#pragma omp section
 			{
@@ -559,23 +769,102 @@ LongNum P_ladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 LongNum T_ladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
 	LongNum r[2] = { LongNum(1, 1), x }, newR[2];
+
+	std::barrier bar(2);
+	std::thread t1([&]() {
+		for (uint32_t idx = BASE_BITS * pow.size() - 1;
+			idx != (uint32_t)(-1); --idx)
+		{
+			const uint32_t curBit = pow.testBit(idx);
+			newR[curBit] = mul(r[curBit], r[curBit]) % mod;
+			bar.arrive_and_wait();
+			r[0] = newR[0];
+			bar.arrive_and_wait();
+		}
+	});
+	std::thread t2([&]() {
+		for (uint32_t idx = BASE_BITS * pow.size() - 1;
+			idx != (uint32_t)(-1); --idx)
+		{
+			const uint32_t curBit = pow.testBit(idx);
+			newR[!curBit] = mul(r[0], r[1]) % mod;
+			bar.arrive_and_wait();
+			r[1] = newR[1];
+			bar.arrive_and_wait();
+		}
+	});
+
+	t1.join();
+	t2.join();
+
+	return r[0];
+}
+
+// Parallel OpenMP Montgomery ladder algorithm with Montgomery multiplication
+LongNum P_monladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+{
+	const LongNum modRInv = R - modinv_base_k(mod, R_DIGIT_COUNT);
+
+	LongNum r[2] = { R % mod, x.shiftWordsUp(R_DIGIT_COUNT) % mod }, newR[2];
 	for (uint32_t idx = BASE_BITS * pow.size() - 1;
 		idx != (uint32_t)(-1); --idx)
 	{
 		const uint32_t curBit = pow.testBit(idx);
-		std::thread t1([&]() {
-			newR[curBit] = mul(r[curBit], r[curBit]) % mod;
-		});
-		std::thread t2([&]() {
-			newR[!curBit] = mul(r[0], r[1]) % mod;
-		});
-		t1.join();
-		t2.join();
-
+		#pragma omp parallel sections num_threads(2)
+		{
+			#pragma omp section
+			{
+				newR[curBit] = mul(r[curBit], r[curBit]);
+				newR[curBit] = redc(newR[curBit], mod, modRInv);
+			}
+			#pragma omp section
+			{
+				newR[!curBit] = mul(r[0], r[1]);
+				newR[!curBit] = redc(newR[!curBit], mod, modRInv);
+			}
+		}
 		r[0] = newR[0];
 		r[1] = newR[1];
 	}
-	return r[0];
+	return redc(r[0], mod, modRInv);
+}
+
+// Parallel std::thread Montgomery ladder algorithm with Montgomery multiplication
+LongNum T_monladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+{
+	const LongNum modRInv = R - modinv_base_k(mod, R_DIGIT_COUNT);
+
+	LongNum r[2] = { R % mod, x.shiftWordsUp(R_DIGIT_COUNT) % mod }, newR[2];
+	std::barrier bar(2);
+	std::thread t1([&]() {
+		for (uint32_t idx = BASE_BITS * pow.size() - 1;
+			idx != (uint32_t)(-1); --idx)
+		{
+			const uint32_t curBit = pow.testBit(idx);
+			newR[curBit] = mul(r[curBit], r[curBit]);
+			newR[curBit] = redc(newR[curBit], mod, modRInv);
+			bar.arrive_and_wait();
+			r[0] = newR[0];
+			bar.arrive_and_wait();
+		}
+	});
+	std::thread t2([&]() {
+		for (uint32_t idx = BASE_BITS * pow.size() - 1;
+			idx != (uint32_t)(-1); --idx)
+		{
+			const uint32_t curBit = pow.testBit(idx);
+			newR[!curBit] = mul(r[0], r[1]);
+			newR[!curBit] = redc(newR[!curBit], mod, modRInv);
+			bar.arrive_and_wait();
+			r[1] = newR[1];
+			bar.arrive_and_wait();
+		}
+	});
+
+	t1.join();
+	t2.join();
+
+	return redc(r[0], mod, modRInv);
 }
 
 template<typename Fn, typename... Params>
@@ -634,16 +923,18 @@ int main()
 	
 	std::cout << "a: " << BASE_BITS * a.size() << " bits" << std::endl;
 	std::cout << "b: " << BASE_BITS * b.size() << " bits" << std::endl;
+	std::cout << "b set bit count (popcount): " << b.popcount() << std::endl;
 	std::cout << "m: " << BASE_BITS * m.size() << " bits" << std::endl;
 
-	/*std::cout << "a + b = " << toString(a + b) << std::endl;
-	std::cout << "a - b = " << toString(a - b) << std::endl;
-	std::cout << "a * b = " << toString(mul(a, b)) << std::endl;
+	/*std::cout << "a + b = " << a + b << std::endl;
+	std::cout << "a - b = " << a - b << std::endl;
+	std::cout << "a * b = " << mul(a, b) << std::endl;
 	const auto [quot, rem] = divmod(a, b);
-	std::cout << "a / b = " << toString(quot) << std::endl;
-	std::cout << "a % b = " << toString(rem) << std::endl;
-	std::cout << "a^b mod m = " << toString(P_powmod(a, b, m)) << std::endl;
-	std::cout << "a^b mod m = " << toString(powmod(a, b, m)) << std::endl;*/
+	std::cout << "a / b = " << quot << std::endl;
+	std::cout << "a % b = " << rem << std::endl;
+	std::cout << "a^b mod m = " << P_powmod(a, b, m) << std::endl;
+	std::cout << "a^b mod m = " << powmod(a, b, m) << std::endl;
+	std::cout << "m^(-1) mod R = " << modinv_base_k(m, R_DIGIT_COUNT) << std::endl;*/
 
 	using namespace std::string_view_literals;
 	std::vector<std::pair<std::string_view, decltype(&powmod)>> funcs{
@@ -654,10 +945,30 @@ int main()
 		{"Dividing std::thread parallel binary power mod: "sv, DT_powmod},
 
 		{"Left-to-right binary power mod: "sv, ltrpowmod},
+		{"Dividing OpenMP parallel LTR binary power mod: "sv, D_ltrpowmod},
+		{"Dividing std::thread parallel LTR binary power mod: "sv, DT_ltrpowmod},
+
 		{"Montgomery ladder: "sv, ladpowmod},
 		{"OpenMP parallel montgomery ladder: "sv, P_ladpowmod},
-		{"std::thread parallel montgomery ladder: "sv, T_ladpowmod}
+		{"std::thread parallel montgomery ladder: "sv, T_ladpowmod},
 	};
+	if (m.lowestBit()) // if m is odd
+	{
+		R_DIGIT_COUNT = m.size();
+		R = LongNum(1, 1).shiftWordsUp(R_DIGIT_COUNT);
+		// Now R is the smallest power of BASE that is greater than M
+		funcs.insert(funcs.end(), {
+			{"Binary with Montgomery multiplication: "sv, monpowmod},
+			{"Left-to-right binary with Montgomery multiplication: "sv, monltrpowmod},
+			{"Montgomery ladder with Montgomery multiplication: "sv, monladpowmod},
+			{"OpenMP parallel Montgomery ladder with Montgomery multiplication"sv, P_monladpowmod},
+			{"std::thread parallel Montgomery ladder with Montgomery multiplication"sv, T_monladpowmod}
+			});
+	}
+	else
+		std::cout << "Warning, algorithms based on Montgomery multiplication will"
+		" be excluded because modulus is even!" << std::endl;
+
 	bench(funcs, a, b, m);
 
 	return 0;
