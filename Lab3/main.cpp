@@ -1,5 +1,12 @@
 #include <iostream>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <array>
 #include <vector>
+#include <ranges>
+#include <span>
+#include <random>
 #include <cassert>
 #include <algorithm>
 #include <chrono>
@@ -14,7 +21,7 @@ constexpr uint32_t BASE_BITS = 32;
 constexpr uint64_t BASE = 1ull << BASE_BITS;
 constexpr uint64_t BASE_MASK = BASE - 1;
 
-constexpr uint32_t MAX_DIGIT_COUNT = 800;
+constexpr uint32_t MAX_DIGIT_COUNT = 400;
 constexpr uint32_t MAX_BIT_COUNT = MAX_DIGIT_COUNT * BASE_BITS;
 
 constexpr int BENCH_REPEATS = 1;
@@ -575,6 +582,7 @@ LongNum monladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	return redc(r[0], mod, modRInv);
 }
 
+// OpenMP-parallel right-to-left binary algorithm
 LongNum P_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
 	LongNum res(1, 1), x2;
@@ -598,6 +606,7 @@ LongNum P_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	return res;
 }
 
+// std::thread-parallel right-to-left binary algorithm
 LongNum T_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
 	LongNum res(1, 1), x2;
@@ -628,10 +637,11 @@ LongNum T_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	return res;
 }
 
-LongNum D_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
+// OpenMP-parallel split exponent right-to-left binary algorithm
+LongNum SP_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
-	//const uint32_t powHSize = pow.size() / 2;
-	uint32_t powHSize = 0, bitCnt = 0, desiredHBitCnt = 0;
+	const uint32_t powHSize = pow.size() / 4;
+	/*uint32_t powHSize = 0, bitCnt = 0, desiredHBitCnt = 0;
 	for (uint32_t i = 0; i < pow.size(); ++i)
 		desiredHBitCnt += __popcnt(pow[i]);
 	desiredHBitCnt /= 3;
@@ -643,7 +653,7 @@ LongNum D_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 		++powHSize;
 	}
 	if (powHSize == 0)
-		return powmod(x, pow, mod);
+		return powmod(x, pow, mod);*/
 
 	const uint32_t powLSize = pow.size() - powHSize;
 	const LongNum powH = pow.higherDigits(powHSize);
@@ -668,9 +678,10 @@ LongNum D_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	return mul(resH, resL) % mod;
 }
 
-LongNum DT_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
+// std::thread-parallel split exponent right-to-left binary algorithm
+LongNum ST_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
-	const uint32_t powHSize = pow.size() / 3;
+	const uint32_t powHSize = pow.size() / 4;
 	const uint32_t powLSize = pow.size() - powHSize;
 	const LongNum powH = pow.higherDigits(powHSize);
 	const LongNum powL = pow.lowerDigits(powLSize);
@@ -691,9 +702,10 @@ LongNum DT_powmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	return mul(resH, resL) % mod;
 }
 
-LongNum D_ltrpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+// OpenMP-parallel split exponent left-to-right binary algorithm
+LongNum SP_ltrpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
-	const uint32_t powHSize = pow.size() / 2;
+	const uint32_t powHSize = pow.size() / 4;
 	const uint32_t powLSize = pow.size() - powHSize;
 	const LongNum powH = pow.higherDigits(powHSize);
 	const LongNum powL = pow.lowerDigits(powLSize);
@@ -717,9 +729,10 @@ LongNum D_ltrpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	return mul(resH, resL) % mod;
 }
 
-LongNum DT_ltrpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+// std::thread-parallel split exponent left-to-right binary algorithm
+LongNum ST_ltrpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
-	const uint32_t powHSize = pow.size() / 2;
+	const uint32_t powHSize = pow.size() / 4;
 	const uint32_t powLSize = pow.size() - powHSize;
 	const LongNum powH = pow.higherDigits(powHSize);
 	const LongNum powL = pow.lowerDigits(powLSize);
@@ -800,6 +813,74 @@ LongNum T_ladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	return r[0];
 }
 
+// Parallel OpenMP binary right-to-left with Montgomery multiplication
+LongNum P_monpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+{
+	LongNum xMon = x.shiftWordsUp(R_DIGIT_COUNT) % mod, xMon2;
+	LongNum resMon = R % mod;
+	const LongNum modRInv = R - modinv_base_k(mod, R_DIGIT_COUNT);
+
+	for (uint32_t idx = 0; idx < BASE_BITS * pow.size(); ++idx)
+	{
+		#pragma omp parallel sections num_threads(2)
+		{
+			#pragma omp section
+			{
+				if (pow.testBit(idx))
+				{
+					resMon = mul(resMon, xMon);
+					resMon = redc(resMon, mod, modRInv);
+				}
+			}
+			#pragma omp section
+			{
+				xMon2 = mul(xMon, xMon);
+				xMon2 = redc(xMon2, mod, modRInv);
+			}
+		}
+
+		xMon = xMon2;
+	}
+	return redc(resMon, mod, modRInv);
+}
+
+// Parallel std::thread binary right-to-left with Montgomery multiplication
+LongNum T_monpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
+{
+	LongNum xMon = x.shiftWordsUp(R_DIGIT_COUNT) % mod, xMon2;
+	LongNum resMon = R % mod;
+	const LongNum modRInv = R - modinv_base_k(mod, R_DIGIT_COUNT);
+
+	std::barrier bar(2);
+	std::thread t1([&]() {
+		for (uint32_t idx = 0; idx < BASE_BITS * pow.size(); ++idx)
+		{
+			if (pow.testBit(idx))
+			{
+				resMon = mul(resMon, xMon);
+				resMon = redc(resMon, mod, modRInv);
+			}
+			bar.arrive_and_wait();
+			xMon = xMon2;
+			bar.arrive_and_wait();
+		}
+	});
+	std::thread t2([&]() {
+		for (uint32_t idx = 0; idx < BASE_BITS * pow.size(); ++idx)
+		{
+			xMon2 = mul(xMon, xMon);
+			xMon2 = redc(xMon2, mod, modRInv);
+			bar.arrive_and_wait();
+			bar.arrive_and_wait();
+		}
+	});
+
+	t1.join();
+	t2.join();
+
+	return redc(resMon, mod, modRInv);
+}
+
 // Parallel OpenMP Montgomery ladder algorithm with Montgomery multiplication
 LongNum P_monladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 {
@@ -867,6 +948,24 @@ LongNum T_monladpowmod(LongNum x, const LongNum& pow, const LongNum& mod)
 	return redc(r[0], mod, modRInv);
 }
 
+using ModExpFnType = decltype(&powmod);
+
+struct Testcase
+{
+	LongNum a;
+	LongNum b;
+	LongNum m;
+};
+
+struct Algorithm
+{
+	std::string_view desc;
+	std::string_view name;
+	ModExpFnType fn;
+};
+
+// Generic bench function, outputs results directly to cout
+// Maybe will be removed later because of benchBrief
 template<typename Fn, typename... Params>
 void bench(const std::vector<std::pair<
 	std::string_view, Fn>>& fns, Params&&... params)
@@ -879,12 +978,12 @@ void bench(const std::vector<std::pair<
 		ResultType curRes;
 		auto start = high_resolution_clock::now();
 		for (int i = 0; i < BENCH_REPEATS; ++i)
-			curRes = fn(std::forward<Params>(params)...);
+			curRes = fn(params...);
 		auto end = high_resolution_clock::now();
 		return std::pair{ duration_cast<microseconds>(
-			end - start).count(), curRes };
+			end - start).count() / BENCH_REPEATS, curRes };
 	};
-	
+
 	ResultType result;
 	bool first = true;
 	for (const auto& [desc, fn] : fns)
@@ -896,11 +995,11 @@ void bench(const std::vector<std::pair<
 			result = curRes;
 		else if (result != curRes)
 		{
-			std::cout << "Results disagree, stopping bench" << std::endl;
-			std::cout << "Previous results were: " << std::endl;
-			std::cout << "    " << result << std::endl;
-			std::cout << "Current result is: " << std::endl;
-			std::cout << "    " << curRes << std::endl;
+			std::cerr << "Results disagree, stopping bench" << std::endl;
+			std::cerr << "Previous results were: " << std::endl;
+			std::cerr << "    " << result << std::endl;
+			std::cerr << "Current result is: " << std::endl;
+			std::cerr << "    " << curRes << std::endl;
 			return;
 		}
 		first = false;
@@ -909,8 +1008,205 @@ void bench(const std::vector<std::pair<
 	std::cout << "All results agree: " << result << std::endl;
 }
 
-int main()
+// Bench function for modular exponentiation algorithms
+// Not generic, but outputs only average execution
+// times (as a return value) and doesnt use cout/cerr
+// Maybe will eventually fully replace 'bench' function here
+std::vector<float> benchBrief(std::span<const Algorithm> fns,
+	const Testcase& testcase)
 {
+	auto testFn = [&testcase](const auto& fn, auto&&... params) {
+		using namespace std::chrono;
+
+		LongNum curRes;
+		auto start = high_resolution_clock::now();
+		for (int i = 0; i < BENCH_REPEATS; ++i)
+			curRes = fn(testcase.a, testcase.b, testcase.m);
+		auto end = high_resolution_clock::now();
+		return std::pair{ duration_cast<microseconds>(
+			end - start).count() / (1000.f * BENCH_REPEATS), curRes };
+	};
+	
+	std::vector<float> durs;
+	LongNum result;
+	bool first = true;
+	for (const auto& [desc, name, fn] : fns)
+	{
+		const auto& [dur, curRes] = testFn(fn, testcase);
+		durs.push_back(dur);
+		if (first)
+			result = curRes;
+		else if (result != curRes)
+		{
+			std::stringstream ss;
+			ss << "Results disagree, stopping bench\n";
+			ss << "Previous results were: \n";
+			ss << "    " << result << '\n';
+			ss << "Current algorithm (" << name << " - "
+				<< desc << ")  result is: \n";
+			ss << "    " << curRes << '\n';
+			throw std::runtime_error(ss.str());
+		}
+		first = false;
+	}
+
+	return durs;
+}
+
+const std::array algorithms = {
+	Algorithm{"Binary (right-to-left) power mod: ", "powmod", powmod},
+	Algorithm{"OpenMP parallel binary power mod: ", "P_powmod", P_powmod},
+	Algorithm{"std::thread parallel binary power mod: ", "T_powmod", T_powmod},
+	Algorithm{"Split OpenMP parallel binary power mod: ", "SP_powmod", SP_powmod},
+	Algorithm{"Split std::thread parallel binary power mod: ", "ST_powmod", ST_powmod},
+
+	Algorithm{"Left-to-right binary power mod: ", "ltrpowmod", ltrpowmod},
+	Algorithm{"Split OpenMP parallel LTR binary power mod: ", "SP_ltrpowmod", SP_ltrpowmod},
+	Algorithm{"Split std::thread parallel LTR binary power mod: ", "ST_ltrpowmod", ST_ltrpowmod},
+
+	Algorithm{"Montgomery ladder: ", "ladpowmod", ladpowmod},
+	Algorithm{"OpenMP parallel montgomery ladder: ", "P_ladpowmod", P_ladpowmod},
+	Algorithm{"std::thread parallel montgomery ladder: ", "T_ladpowmod", T_ladpowmod},
+
+	Algorithm{"Binary with Montgomery multiplication: ", "monpowmod", monpowmod},
+	Algorithm{"OpenMP parallel binary power mod with Montgomery multiplication: ", "P_monpowmod", P_monpowmod},
+	Algorithm{"std::thread parallel binary power mod with Montgomery multiplication: ", "T_monpowmod", T_monpowmod},
+
+	Algorithm{"Left-to-right binary with Montgomery multiplication: ", "monltrpowmod", monltrpowmod},
+
+	Algorithm{"Montgomery ladder with Montgomery multiplication: ", "monladpowmod", monladpowmod},
+	Algorithm{"OpenMP parallel Montgomery ladder with Montgomery multiplication", "P_monladpowmod", P_monladpowmod},
+	Algorithm{"std::thread parallel Montgomery ladder with Montgomery multiplication", "T_monladpowmod", T_monladpowmod}
+};
+
+void processTestcases(std::istream& in, std::ostream& out)
+{
+	std::vector<std::vector<float>> results(algorithms.size()); // ms
+	std::vector<Testcase> testcases;
+
+	std::string aStr, bStr, mStr;
+	while (in >> aStr >> bStr >> mStr)
+	{
+		const LongNum a = fromString(aStr), b = fromString(bStr),
+			m = fromString(mStr);
+		if (!m.lowestBit()) // if m is odd
+		{
+			std::cerr << "Modulus should be odd for testing all algorithms" << std::endl;
+			return;
+		}
+		testcases.emplace_back(a, b, m);
+	}
+
+	try
+	{
+		for (size_t testcaseIdx = 0; testcaseIdx < testcases.size(); ++testcaseIdx)
+		{
+			const Testcase& testcase = testcases[testcaseIdx];
+
+			R_DIGIT_COUNT = testcase.m.size();
+			R = LongNum(1, 1).shiftWordsUp(R_DIGIT_COUNT);
+			// Now R is the smallest power of BASE that is greater than M
+
+			std::cout << "Processing testcase #" << testcaseIdx << "...";
+			auto curResults = benchBrief(algorithms, testcase);
+			for (size_t i = 0; i < algorithms.size(); ++i)
+				results[i].push_back(curResults[i]);
+			std::cout << " done" << std::endl;
+		}
+	}
+	catch (const std::runtime_error& err)
+	{
+		out << err.what();
+		std::cerr << err.what();
+		return;
+	}
+
+	std::cout << "Finished processing testcases.\nGenerating output..." << std::endl;
+	for (size_t i = 0; i < algorithms.size(); ++i)
+		out << algorithms[i].name << " - " << algorithms[i].desc << std::endl;
+	out << std::endl;
+	out << std::fixed << std::setprecision(2);
+	out << "bits\t";
+	for (const auto& testcase : testcases)
+		out << BASE_BITS * testcase.m.size() << '\t';
+	out << std::endl;
+	for (size_t i = 0; i < algorithms.size(); ++i)
+	{
+		out << algorithms[i].name << '\t';
+		for (float res : results[i])
+			out << res << '\t';
+		out << std::endl;
+	}
+	std::cout << " done" << std::endl;
+}
+
+void generateTestcases(std::ostream& out)
+{
+	std::random_device rd;
+	std::mt19937 engine(rd());
+	std::uniform_int_distribution<uint32_t> dist;
+	auto genU32 = [&]() {return dist(engine); };
+	auto generateLongNum = [&](uint32_t siz) {
+		LongNum res(siz, 0);
+		std::generate(res.digits.begin(), res.digits.end(), genU32);
+		while (!res.lowestBit()) // Avoid even modulus
+			res.digits[0] = genU32();
+		while (!res.digits.back()) // Avoid zero highest digit
+			res.digits.back() = genU32();
+		return res;
+	};
+
+	std::cout << "Generating long numbers...";
+	// Order of numbers in testcases - base (a), exponent (b), modulo (m)
+	for (size_t i = 16; i < MAX_DIGIT_COUNT / 2; i += 16)
+		out << generateLongNum(i) << '\n' << generateLongNum(i) << '\n'
+			<< generateLongNum(i) << '\n' << std::endl;
+	std::cout << " done" << std::endl;
+}
+
+void showHelp(std::string_view command)
+{
+	std::cout << "Valid modes of operation:\n";
+	std::cout << command << " - interactive mode\n";
+	std::cout << command << " gen <path> - generate and save test data to <path>\n";
+	std::cout << command << " test <in> <out> - launch benchmark for tests in "
+		"<in> and output results to <out>" << std::endl;
+}
+
+int main(int argc, char** argv)
+{
+	if (argc == 4)
+	{
+		if (strcmp(argv[1], "test") == 0)
+		{
+			std::ifstream in(argv[2]);
+			std::ofstream out(argv[3]);
+			processTestcases(in, out);
+			in.close();
+			out.close();
+		}
+		else
+			showHelp(argv[0]);
+		return 0;
+	}
+	else if (argc == 3)
+	{
+		if (strcmp(argv[1], "gen") == 0)
+		{
+			std::ofstream out(argv[2]);
+			generateTestcases(out);
+			out.close();
+		}
+		else
+			showHelp(argv[0]);
+		return 0;
+	}
+	else if (argc != 1)
+	{
+		showHelp(argv[0]);
+		return 0;
+	}
+
 	std::string aStr, bStr, mStr;
 	std::cout << "Enter a (base): " << std::endl;
 	std::cin >> aStr;
@@ -937,16 +1233,16 @@ int main()
 	std::cout << "m^(-1) mod R = " << modinv_base_k(m, R_DIGIT_COUNT) << std::endl;*/
 
 	using namespace std::string_view_literals;
-	std::vector<std::pair<std::string_view, decltype(&powmod)>> funcs{
+	std::vector<std::pair<std::string_view, ModExpFnType>> funcs{
 		{"Binary (right-to-left) power mod: "sv, powmod},
 		{"OpenMP parallel binary power mod: "sv, P_powmod},
 		{"std::thread parallel binary power mod: "sv, T_powmod},
-		{"Dividing OpenMP parallel binary power mod: "sv, D_powmod},
-		{"Dividing std::thread parallel binary power mod: "sv, DT_powmod},
+		{"Split OpenMP parallel binary power mod: "sv, SP_powmod},
+		{"Split std::thread parallel binary power mod: "sv, ST_powmod},
 
 		{"Left-to-right binary power mod: "sv, ltrpowmod},
-		{"Dividing OpenMP parallel LTR binary power mod: "sv, D_ltrpowmod},
-		{"Dividing std::thread parallel LTR binary power mod: "sv, DT_ltrpowmod},
+		{"Split OpenMP parallel LTR binary power mod: "sv, SP_ltrpowmod},
+		{"Split std::thread parallel LTR binary power mod: "sv, ST_ltrpowmod},
 
 		{"Montgomery ladder: "sv, ladpowmod},
 		{"OpenMP parallel montgomery ladder: "sv, P_ladpowmod},
@@ -961,12 +1257,14 @@ int main()
 			{"Binary with Montgomery multiplication: "sv, monpowmod},
 			{"Left-to-right binary with Montgomery multiplication: "sv, monltrpowmod},
 			{"Montgomery ladder with Montgomery multiplication: "sv, monladpowmod},
+			{"OpenMP parallel binary power mod with Montgomery multiplication: "sv, P_monpowmod},
+			{"std::thread parallel binary power mod with Montgomery multiplication: "sv, T_monpowmod},
 			{"OpenMP parallel Montgomery ladder with Montgomery multiplication"sv, P_monladpowmod},
 			{"std::thread parallel Montgomery ladder with Montgomery multiplication"sv, T_monladpowmod}
 			});
 	}
 	else
-		std::cout << "Warning, algorithms based on Montgomery multiplication will"
+		std::cerr << "Warning, algorithms based on Montgomery multiplication will"
 		" be excluded because modulus is even!" << std::endl;
 
 	bench(funcs, a, b, m);
